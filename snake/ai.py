@@ -15,69 +15,83 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
 
-class ReplayMemory(object):
+class BasicBuffer:
 
-    def __init__(self, capacity):
-        self.capacity = capacity
-        self.memory = []
-        self.position = 0
-    
-    def push(self, *args):
-        if len(self.memory) < self.capacity:
-            self.memory.append(None)
-        self.memory[self.position] = Transition(*args)
-        self.position = (self.position + 1) % self.capacity
+    def __init__(self, max_size):
+        self.max_size = max_size
+        self.buffer = deque(maxlen=max_size)
+
+    def push(self, state, action, reward, next_state, done):
+        experience = (state, action, np.array([reward]), next_state, done)
+        self.buffer.append(experience)
 
     def sample(self, batch_size):
-        print(self.memory)
-        return random.sample(self.memory, batch_size)
+        state_batch = []
+        action_batch = []
+        reward_batch = []
+        next_state_batch = []
+        done_batch = []
+
+        batch = random.sample(self.buffer, batch_size)
+
+        for experience in batch:
+            state, action, reward, next_state, done = experience
+            state_batch.append(state)
+            action_batch.append(action)
+            reward_batch.append(reward)
+            next_state_batch.append(next_state)
+            done_batch.append(done)
+
+        return (state_batch, action_batch, reward_batch, next_state_batch, done_batch)
 
     def __len__(self):
-        return len(self.memory)
+        return len(self.buffer)
 
-# class DQN(nn.Module):
-#     def __init__(self, h, w, outputs):
-#         super(DQN, self).__init__()
-#         self.conv1 = nn.Conv2d(3, 16, kernel_size=5, stride=2)
-#         self.bn1 = nn.BatchNorm2d(16)
-#         self.conv2 = nn.Conv2d(16, 32, kernel_size=5, stride=2)
-#         self.bn2 = nn.BatchNorm2d(32)
-#         self.conv3 = nn.Conv2d(32, 32, kernel_size=5, stride=2)
-#         self.bn3 = nn.BatchNorm2d(32)
+class DQNAgent:
 
-#         # Number of Linear input connections depends on output of conv2d layers
-#         # and therefore the input image size, so compute it.
-#         def conv2d_size_out(size, kernel_size = 5, stride = 2):
-#             return (size - (kernel_size - 1) - 1) // stride  + 1
-#         convw = conv2d_size_out(conv2d_size_out(conv2d_size_out(w)))
-#         convh = conv2d_size_out(conv2d_size_out(conv2d_size_out(h)))
-#         linear_input_size = convw * convh * 32
-#         self.head = nn.Linear(linear_input_size, outputs)
+    def __init__(self, env, use_conv=True, learning_rate=3e-4, gamma=0.99, buffer_size=10000):
+        self.env = env
+        self.learning_rate = learning_rate
+        self.gamma = gamma
+        self.replay_buffer = BasicBuffer(max_size=buffer_size)
+        self.model = DQN(env.observation_space.shape, env.action_space.n)
+        self.optimizer = torch.optim.Adam(self.model.parameters())
+        self.MSE_loss = nn.MSELoss()
 
-#     def forward(self, x):
-#         x = F.relu(self.bn1(self.conv1(x)))
-#         x = F.relu(self.bn2(self.conv2(x)))
-#         x = F.relu(self.bn3(self.conv3(x)))
-#         return self.head(x.view(x.size(0), -1))
+    def get_action(self, state):
+        state = autograd.Variable(torch.from_numpy(state).float().unsqueeze(0))
+        qvals = self.model.forward(state)
+        action = np.argmax(qvals.detach().numpy())
 
-class DQN(nn.Module):
-    def __init__(self, h, w, outputs):
-        super(DQN, self).__init__()
-        self.layer1 = nn.Linear(w * h, w * h)
-        self.layer2 = nn.Linear(w * h, w * h)
-        self.layer3 = nn.Linear(w * h, outputs)
+        return action
 
-    def forward(self, x):
-        x = F.relu(self.layer1(x))
-        x = F.relu(self.layer2(x))
-        x = F.log_softmax(self.layer3(x))
-        return x
+    def compute_loss(self, batch):
+        states, actions, rewards, next_states, dones = batch
+        states = torch.FloatTensor(states)
+        actions = torch.LongTensor(actions)
+        rewards = torch.FloatTensor(rewards)
+        next_states = torch.FloatTensor(next_states)
+        dones = torch.FloatTensor(dones)
+
+        curr_Q = self.model.forward(states).gather(1, actions.unsqueeze(1))
+        curr_Q = curr_Q.squeeze(1)
+        next_Q = self.model.forward(next_states)
+        max_next_Q = torch.max(next_Q, 1)[0]
+        expected_Q = rewards.squeeze(1) + (1 - dones) * self.gamma * max_next_Q
+
+        loss = self.MSE_loss(curr_Q, expected_Q.detach())
+        return loss
+
+    def update(self, batch_size):
+        batch = self.replay_buffer.sample(batch_size)
+        loss = self.compute_loss(batch)
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
 
 BATCH_SIZE = 4
 GAMMA = 0.999
-EPS_START = 0.9
-EPS_END = 0.05
-EPS_DECAY = 200
 TARGET_UPDATE = 10
 width = 10
 height = 10
